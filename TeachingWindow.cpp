@@ -6,6 +6,18 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <algorithm>
+#include <wininet.h>
+
+#pragma comment(lib, "wininet.lib")
+
+// 定义 min/max 宏（如果未定义）
+#ifndef min
+#define min(a,b) ((a)<(b)?(a):(b))
+#endif
+#ifndef max
+#define max(a,b) ((a)>(b)?(a):(b))
+#endif
 
 // UI 缩放因子（将所有尺寸放大 25%）
 const float UI_SCALE = 1.25f;
@@ -24,6 +36,7 @@ const int BUTTON_AREA_HEIGHT = WINDOW_HEIGHT - TITLE_HEIGHT - CLOSE_HEIGHT; // �
 HWND g_hwnd;
 bool g_isDragging = false;
 POINT g_dragOffset;
+int g_hoveredButton = -1;  // 悬停的按钮索引
 
 // 配置
 std::vector<std::wstring> g_configStudents; // if non-empty, use these for random
@@ -34,7 +47,31 @@ std::wstring g_button4Url; // URL for button 4 (注意)
 std::wstring g_button5Url; // URL for button 5 (思考)
 DWORD g_rollDuration = 2000;        // 可配置的滚动持续时间（默认800ms）
 
+// 从 GitHub 下载配置文件
+static bool downloadConfigFromGitHub() {
+    // GitHub raw 文件 URL
+    const wchar_t* url = L"https://raw.githubusercontent.com/kookoo2024/teachwin/master/config.json";
+    const wchar_t* localPath = L".\\config.json";
+    
+    // 使用 URLDownloadToFile 下载文件
+    HRESULT hr = URLDownloadToFileW(NULL, url, localPath, 0, NULL);
+    
+    if (SUCCEEDED(hr)) {
+        return true;
+    }
+    return false;
+}
+
 static std::wstring getConfigPathGlobal() {
+    // 优先使用当前目录的 config.json（方便手动下载放置）
+    std::wstring localConfig = L".\\config.json";
+    FILE* testFile = _wfopen(localConfig.c_str(), L"r");
+    if (testFile) {
+        fclose(testFile);
+        return localConfig;
+    }
+    
+    // 如果当前目录没有，使用 APPDATA 目录
     wchar_t buf[MAX_PATH];
     DWORD len = GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
     std::wstring path;
@@ -183,6 +220,15 @@ const wchar_t* getRandomStudent() {
         initialized = true;
     }
     
+    // 优先使用配置文件中的学生名单
+    if (!g_configStudents.empty()) {
+        int randomIndex = rand() % g_configStudents.size();
+        static std::wstring result;
+        result = g_configStudents[randomIndex];
+        return result.c_str();
+    }
+    
+    // 如果配置为空，使用默认的 105 班名单
     int randomIndex = rand() % STUDENT_COUNT;
     return students105[randomIndex];
 }
@@ -511,6 +557,7 @@ void ShowBeautifulRollCallWindow(const wchar_t* studentName) {
     wc.lpszClassName = ROLL_CLASS_NAME;
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(RGB(240, 248, 255));
+    wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);  // 使用系统应用程序图标
     
     RegisterClassW(&wc);
     
@@ -593,8 +640,21 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
             // 学生名单标签
             HWND staticStu = CreateWindowW(L"STATIC", L"学生名单（空格或逗号分隔）：", WS_CHILD | WS_VISIBLE, S(20), stuY, S(250), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
             SendMessage(staticStu, WM_SETFONT, (WPARAM)hFont, TRUE);
+            
+            // 学生名单编辑框（多行）
+            stuY += S(25);
+            std::wstring studentList;
+            for (size_t i = 0; i < g_configStudents.size(); ++i) {
+                if (i > 0) studentList += L" ";
+                studentList += g_configStudents[i];
+            }
+            HWND editStu = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", studentList.c_str(), 
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE | WS_VSCROLL,
+                S(20), stuY, S(540), S(60), hwnd, (HMENU)3002, GetModuleHandle(NULL), NULL);
+            SendMessage(editStu, WM_SETFONT, (WPARAM)hFont, TRUE);
+            
             // 点名动画间隔设置
-            int animY = stuY + S(45); // 在学生名单下方留出间距
+            int animY = stuY + S(70); // 在学生名单下方留出间距
             // 动画间隔标签
             HWND staticAnim = CreateWindowW(L"STATIC", L"点名动画间隔：", WS_CHILD | WS_VISIBLE, S(20), animY, S(120), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
             SendMessage(staticAnim, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -620,11 +680,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
 
             // 更新按钮位置
             int btnY = animY + S(50); // 在动画间隔设置下方留出间距
+            
+            // 获取配置按钮（从 GitHub 下载）
+            HWND btnDownload = CreateWindowW(L"BUTTON", L"📥 获取配置", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(420), btnY, S(140), S(30), hwnd, (HMENU)3009, GetModuleHandle(NULL), NULL);
+            SendMessage(btnDownload, WM_SETFONT, (WPARAM)hFont, TRUE);
+            
             // 保存按钮
-            HWND btnSave = CreateWindowW(L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(80), btnY, S(100), S(30), hwnd, (HMENU)3003, GetModuleHandle(NULL), NULL);
+            HWND btnSave = CreateWindowW(L"BUTTON", L"💾 保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(80), btnY, S(100), S(30), hwnd, (HMENU)3003, GetModuleHandle(NULL), NULL);
             SendMessage(btnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
             // 取消按钮
-            HWND btnCancel = CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(250), btnY, S(100), S(30), hwnd, (HMENU)3004, GetModuleHandle(NULL), NULL);
+            HWND btnCancel = CreateWindowW(L"BUTTON", L"❌ 取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(250), btnY, S(100), S(30), hwnd, (HMENU)3004, GetModuleHandle(NULL), NULL);
             SendMessage(btnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             // 存储字体句柄，以便在WM_DESTROY中销毁
@@ -699,6 +764,68 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
                 case 3004: // 取消按钮ID
                     DestroyWindow(hwnd); // 关闭窗口
                     break;
+                case 3009: // 获取配置按钮ID
+                    {
+                        // 显示下载提示
+                        int result = MessageBoxW(hwnd, 
+                            L"将从 GitHub 下载最新配置文件\n\n"
+                            L"URL: https://github.com/kookoo2024/teachwin\n\n"
+                            L"下载后将自动加载配置，是否继续？", 
+                            L"获取配置", 
+                            MB_YESNO | MB_ICONQUESTION);
+                        
+                        if (result == IDYES) {
+                            // 显示下载中提示
+                            HWND hStatus = CreateWindowW(L"STATIC", L"正在下载配置文件，请稍候...", 
+                                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                S(20), S(520), S(560), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
+                            UpdateWindow(hwnd);
+                            
+                            // 下载配置文件
+                            bool success = downloadConfigFromGitHub();
+                            
+                            // 删除状态提示
+                            if (hStatus) DestroyWindow(hStatus);
+                            
+                            if (success) {
+                                // 重新加载配置
+                                loadConfig();
+                                
+                                // 更新界面显示
+                                SetWindowTextW(GetDlgItem(hwnd, 3001), g_innerUrl.c_str());
+                                SetWindowTextW(GetDlgItem(hwnd, 3005), g_button3Url.c_str());
+                                SetWindowTextW(GetDlgItem(hwnd, 3006), g_button4Url.c_str());
+                                SetWindowTextW(GetDlgItem(hwnd, 3007), g_button5Url.c_str());
+                                
+                                // 更新学生名单
+                                std::wstring studentList;
+                                for (size_t i = 0; i < g_configStudents.size(); ++i) {
+                                    if (i > 0) studentList += L" ";
+                                    studentList += g_configStudents[i];
+                                }
+                                SetWindowTextW(GetDlgItem(hwnd, 3002), studentList.c_str());
+                                
+                                // 更新动画间隔
+                                HWND combo = GetDlgItem(hwnd, 3008);
+                                int selectedIndex = 1;
+                                if (g_rollDuration == 500) selectedIndex = 0;
+                                else if (g_rollDuration == 1000) selectedIndex = 2;
+                                else if (g_rollDuration == 1500) selectedIndex = 3;
+                                SendMessageW(combo, CB_SETCURSEL, selectedIndex, 0);
+                                
+                                MessageBoxW(hwnd, 
+                                    L"配置文件下载成功！\n\n已自动加载新配置，请检查各项设置。\n如需保存，请点击保存按钮。", 
+                                    L"下载成功", 
+                                    MB_OK | MB_ICONINFORMATION);
+                            } else {
+                                MessageBoxW(hwnd, 
+                                    L"配置文件下载失败！\n\n可能的原因：\n1. 网络连接问题\n2. GitHub 访问受限\n3. 文件路径错误\n\n请检查网络连接后重试，或手动下载配置文件。", 
+                                    L"下载失败", 
+                                    MB_OK | MB_ICONERROR);
+                            }
+                        }
+                    }
+                    break;
             }
             return 0;
         }
@@ -723,14 +850,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
             
+            // 创建内存 DC（双缓冲）
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hbmMem = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
+            HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
+            
             // 1. 绘制标题拖动区域（顶部，深蓝色）
             RECT titleRect = {0, 0, WINDOW_WIDTH, TITLE_HEIGHT};
             HBRUSH titleBrush = CreateSolidBrush(RGB(30, 60, 120));
-            FillRect(hdc, &titleRect, titleBrush);
+            FillRect(hdcMem, &titleRect, titleBrush);
             
             // 在标题区域绘制文字
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 255, 255));
+            SetBkMode(hdcMem, TRANSPARENT);
+            SetTextColor(hdcMem, RGB(255, 255, 255));
             
             // 创建标题字体
             HFONT titleFont = CreateFontW(
@@ -738,28 +870,28 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"微软雅黑"
             );
-            HFONT oldFont = (HFONT)SelectObject(hdc, titleFont);
+            HFONT oldFont = (HFONT)SelectObject(hdcMem, titleFont);
             
-            DrawTextW(hdc, L"📚 教学工具 - 拖动", -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdcMem, L"📚 教学工具 - 拖动", -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
             // 2. 绘制教学功能按钮区域（中间，6个紧凑按钮）
             int buttonWidth = WINDOW_WIDTH / 3;  // 每个按钮宽度 = 40像素
             int buttonHeight = BUTTON_AREA_HEIGHT / 2;  // 每个按钮高度 = 27像素
             
-            // 教学按钮颜色和功能
+            // 教学按钮颜色和功能（现代扁平风格）
             COLORREF buttonColors[6] = {
-                RGB(220, 80, 80),   // 红色 - 网页按钮
-                RGB(80, 200, 80),   // 绿色 - 点名系统
-                RGB(80, 120, 220),  // 蓝色 - 提示信息
-                RGB(220, 180, 60),  // 橙色 - 注意事项
-                RGB(180, 80, 200),  // 紫色 - 思考题
-                RGB(60, 180, 200)   // 青色 - 补充说明
+                RGB(231, 76, 60),   // 现代红色 - 网页按钮
+                RGB(46, 204, 113),  // 现代绿色 - 点名系统
+                RGB(52, 152, 219),  // 现代蓝色 - 提示信息
+                RGB(241, 196, 15),  // 现代黄色 - 注意事项
+                RGB(155, 89, 182),  // 现代紫色 - 思考题
+                RGB(26, 188, 156)   // 现代青色 - 补充说明
             };
             
             // 教学按钮文字（紧凑版）
             const wchar_t* buttonTexts[6] = {
                 L"电脑", L"点名", L"TV", 
-                L"备课", L"班级", L"补充"
+                L"备课", L"班级", L"配置"
             };
             
             // 创建按钮字体（加大文字，加粗显示）
@@ -768,7 +900,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"微软雅黑"
             );
-            SelectObject(hdc, buttonFont);
+            SelectObject(hdcMem, buttonFont);
             
             // 绘制6个教学功能按钮（3x2布局）
             for (int i = 0; i < 6; i++) {
@@ -782,26 +914,36 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     TITLE_HEIGHT + (row + 1) * buttonHeight - S(1)        // bottom (减1像素边距)
                 };
                 
+                // 添加悬停效果
+                COLORREF color = buttonColors[i];
+                if (i == g_hoveredButton) {
+                    // 悬停时增加亮度
+                    int r = min(255, GetRValue(color) + 40);
+                    int g = min(255, GetGValue(color) + 40);
+                    int b = min(255, GetBValue(color) + 40);
+                    color = RGB(r, g, b);
+                }
+                
                 // 绘制按钮背景
-                HBRUSH buttonBrush = CreateSolidBrush(buttonColors[i]);
-                FillRect(hdc, &buttonRect, buttonBrush);
+                HBRUSH buttonBrush = CreateSolidBrush(color);
+                FillRect(hdcMem, &buttonRect, buttonBrush);
                 
                 // 绘制按钮边框
                 HPEN borderPen = CreatePen(PS_SOLID, S(1), RGB(255, 255, 255));
-                HPEN oldPen = (HPEN)SelectObject(hdc, borderPen);
+                HPEN oldPen = (HPEN)SelectObject(hdcMem, borderPen);
                 
-                MoveToEx(hdc, buttonRect.left, buttonRect.top, NULL);
-                LineTo(hdc, buttonRect.right, buttonRect.top);
-                LineTo(hdc, buttonRect.right, buttonRect.bottom);
-                LineTo(hdc, buttonRect.left, buttonRect.bottom);
-                LineTo(hdc, buttonRect.left, buttonRect.top);
+                MoveToEx(hdcMem, buttonRect.left, buttonRect.top, NULL);
+                LineTo(hdcMem, buttonRect.right, buttonRect.top);
+                LineTo(hdcMem, buttonRect.right, buttonRect.bottom);
+                LineTo(hdcMem, buttonRect.left, buttonRect.bottom);
+                LineTo(hdcMem, buttonRect.left, buttonRect.top);
                 
-                SelectObject(hdc, oldPen);
+                SelectObject(hdcMem, oldPen);
                 DeleteObject(borderPen);
                 
                 // 绘制按钮文字
-                SetTextColor(hdc, RGB(255, 255, 255));
-                DrawTextW(hdc, buttonTexts[i], -1, &buttonRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SetTextColor(hdcMem, RGB(255, 255, 255));
+                DrawTextW(hdcMem, buttonTexts[i], -1, &buttonRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 
                 DeleteObject(buttonBrush);
             }
@@ -809,14 +951,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 3. 绘制关闭区域（底部，红色）
             RECT closeRect = {0, WINDOW_HEIGHT - CLOSE_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT};
             HBRUSH closeBrush = CreateSolidBrush(RGB(180, 50, 50));
-            FillRect(hdc, &closeRect, closeBrush);
+            FillRect(hdcMem, &closeRect, closeBrush);
             
             // 在关闭区域绘制文字
-            SetTextColor(hdc, RGB(255, 255, 255));
-            DrawTextW(hdc, L"❌ 关闭", -1, &closeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SetTextColor(hdcMem, RGB(255, 255, 255));
+            DrawTextW(hdcMem, L"❌ 关闭", -1, &closeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
-            // 清理资源
-            SelectObject(hdc, oldFont);
+            // 一次性绘制到屏幕（双缓冲）
+            BitBlt(hdc, 0, 0, clientRect.right, clientRect.bottom, hdcMem, 0, 0, SRCCOPY);
+            
+            // 清理双缓冲资源
+            SelectObject(hdcMem, hbmOld);
+            DeleteObject(hbmMem);
+            DeleteDC(hdcMem);
+            
+            // 清理其他资源
+            SelectObject(hdcMem, oldFont);
             DeleteObject(titleFont);
             DeleteObject(buttonFont);
             DeleteObject(titleBrush);
@@ -912,7 +1062,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
                         // 如果设置了 inner url 优先使用
                         if (!g_innerUrl.empty()) {
-                            ShellExecuteW(NULL, L"open", g_innerUrl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                            std::wstring url = g_innerUrl;
+                            // 如果没有协议前缀，自动添加 http://
+                            if (url.find(L"://") == std::wstring::npos) {
+                                url = L"http://" + url;
+                            }
+                            ShellExecuteW(NULL, L"open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
                         } else {
                             std::wstring ip;
                             if (!readManualIp(ip)) ip = L"192.168.6.155";
@@ -1044,6 +1199,32 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         
         case WM_MOUSEMOVE: {
+            // 检测鼠标悬停在哪个按钮上
+            if (!g_isDragging) {
+                int x = LOWORD(lParam);
+                int y = HIWORD(lParam);
+                
+                int oldHovered = g_hoveredButton;
+                g_hoveredButton = -1;
+                
+                if (y >= TITLE_HEIGHT && y < WINDOW_HEIGHT - CLOSE_HEIGHT) {
+                    int buttonY = y - TITLE_HEIGHT;
+                    int buttonRow = buttonY / (BUTTON_AREA_HEIGHT / 2);
+                    int buttonCol = x / (WINDOW_WIDTH / 3);
+                    int buttonIndex = buttonRow * 3 + buttonCol;
+                    
+                    if (buttonIndex >= 0 && buttonIndex < 6) {
+                        g_hoveredButton = buttonIndex;
+                        SetCursor(LoadCursor(NULL, IDC_HAND)); // 手型光标
+                    }
+                }
+                
+                // 如果悬停状态改变，重绘窗口
+                if (oldHovered != g_hoveredButton) {
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+            
             if (g_isDragging) {
                 POINT cursorPos;
                 GetCursorPos(&cursorPos);
@@ -1090,6 +1271,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wcMain.lpszClassName = MAIN_CLASS_NAME;
     wcMain.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wcMain.hbrBackground = CreateSolidBrush(RGB(240, 240, 250));  // 浅色背景
+    wcMain.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);  // 使用系统应用程序图标
     
     RegisterClassW(&wcMain);
 
@@ -1101,6 +1283,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wcSettings.lpszClassName = SETTINGS_CLASS_NAME;
     wcSettings.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wcSettings.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); // 标准背景色
+    wcSettings.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);  // 使用系统应用程序图标
     RegisterClassW(&wcSettings);
     
     // 获取屏幕尺寸，计算右下角位置
@@ -1126,6 +1309,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     
     // 加载配置
     loadConfig();
+
+    // 添加窗口圆角效果
+    HRGN hRgn = CreateRoundRectRgn(0, 0, WINDOW_WIDTH + 1, WINDOW_HEIGHT + 1, 20, 20);
+    SetWindowRgn(g_hwnd, hRgn, TRUE);
 
     // 显示窗口
     ShowWindow(g_hwnd, SW_SHOW);
