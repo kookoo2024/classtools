@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <wininet.h>
+#include <map>
 
 #pragma comment(lib, "wininet.lib")
 
@@ -39,7 +40,9 @@ POINT g_dragOffset;
 int g_hoveredButton = -1;  // 悬停的按钮索引
 
 // 配置
-std::vector<std::wstring> g_configStudents; // if non-empty, use these for random
+std::map<std::wstring, std::vector<std::wstring>> g_allClassStudents; // 所有班级名单
+std::wstring g_currentClass = L"105"; // 当前选中班级，默认105
+std::vector<std::wstring> g_configStudents; // 当前班级名单缓存
 std::wstring g_innerUrl; // if set, use this as the URL to open (for button 0)
 std::wstring g_manualIp; // keep manual ip if present (for button 0)
 std::wstring g_button3Url; // URL for button 3 (提示)
@@ -47,10 +50,8 @@ std::wstring g_button4Url; // URL for button 4 (注意)
 std::wstring g_button5Url; // URL for button 5 (思考)
 DWORD g_rollDuration = 2000;        // 可配置的滚动持续时间（默认800ms）
 
-// 从 GitHub 下载配置文件
-static bool downloadConfigFromGitHub() {
-    // GitHub raw 文件 URL
-    const wchar_t* url = L"https://raw.githubusercontent.com/kookoo2024/teachwin/master/config.json";
+// 从指定URL下载配置文件
+static bool downloadConfigFromUrl(const wchar_t* url) {
     const wchar_t* localPath = L".\\config.json";
     
     // 使用 URLDownloadToFile 下载文件
@@ -60,6 +61,31 @@ static bool downloadConfigFromGitHub() {
         return true;
     }
     return false;
+}
+
+// 从配置源下载配置文件
+static bool downloadConfigFromSource(int sourceId, const wchar_t* customUrl = nullptr) {
+    const wchar_t* url = nullptr;
+    
+    switch(sourceId) {
+        case 3010: // Notion source
+            url = L"https://file.notion.so/f/f/b89324c8-4366-44f4-ad3c-bf7a6791d95e/615eaf23-a313-4a3c-9ab9-961c5921fb4c/config.json?table=block&id=290570ee-d490-8038-a697-fc5516254e3f&spaceId=b89324c8-4366-44f4-ad3c-bf7a6791d95e&expirationTimestamp=1760990400000&signature=8o4KgDClxMQ4C-XvI44cDvTXusYxKwUPv0NkU5QoPGA&downloadName=config.json";
+            break;
+        case 3011: // Github Pages source
+            url = L"https://kookoo2024.github.io/config/config.json";
+            break;
+        case 3012: // Custom source
+            if (customUrl && wcslen(customUrl) > 0) {
+                url = customUrl;
+            } else {
+                return false;
+            }
+            break;
+        default:
+            return false;
+    }
+    
+    return downloadConfigFromUrl(url);
 }
 
 static std::wstring getConfigPathGlobal() {
@@ -82,6 +108,7 @@ static std::wstring getConfigPathGlobal() {
 
 static void loadConfig() {
     g_configStudents.clear();
+    g_allClassStudents.clear();
     g_innerUrl.clear();
     g_manualIp.clear();
     std::wstring cfg = getConfigPathGlobal();
@@ -107,18 +134,46 @@ static void loadConfig() {
         size_t q2 = content.find(L'"', q1+1);
         if (q1!=std::wstring::npos && q2!=std::wstring::npos) g_innerUrl = content.substr(q1+1, q2-q1-1);
     }
-    // students (stored as single string with '|' delimiter)
-    pos = content.find(L"\"students\"");
+    // 读取current_class字段
+    pos = content.find(L"\"current_class\"");
     if (pos != std::wstring::npos) {
         size_t colon = content.find(L':', pos);
         size_t q1 = content.find(L'"', colon);
         size_t q2 = content.find(L'"', q1+1);
         if (q1!=std::wstring::npos && q2!=std::wstring::npos) {
-            std::wstring s = content.substr(q1+1, q2-q1-1);
-            // split by '|'
-            std::wstring cur; for (wchar_t c: s) { if (c==L'|') { if (!cur.empty()) g_configStudents.push_back(cur); cur.clear(); } else cur.push_back(c); }
-            if (!cur.empty()) g_configStudents.push_back(cur);
+            g_currentClass = content.substr(q1+1, q2-q1-1);
         }
+    }
+    // 多班级名单 students_XXX
+    size_t searchPos = 0;
+    while (true) {
+        size_t keyPos = content.find(L"\"students_", searchPos);
+        if (keyPos == std::wstring::npos) break;
+        size_t keyEnd = content.find(L'"', keyPos+1);
+        if (keyEnd == std::wstring::npos) break;
+        std::wstring classKey = content.substr(keyPos+1, keyEnd-keyPos-1); // students_105
+        size_t colon = content.find(L':', keyEnd);
+        size_t q1 = content.find(L'"', colon);
+        size_t q2 = content.find(L'"', q1+1);
+        if (colon!=std::wstring::npos && q1!=std::wstring::npos && q2!=std::wstring::npos) {
+            std::wstring s = content.substr(q1+1, q2-q1-1);
+            std::vector<std::wstring> students;
+            std::wstring cur;
+            for (wchar_t c: s) { if (c==L'|') { if (!cur.empty()) students.push_back(cur); cur.clear(); } else cur.push_back(c); }
+            if (!cur.empty()) students.push_back(cur);
+            g_allClassStudents[classKey.substr(9)] = students; // 只保留班级号
+        }
+        searchPos = q2+1;
+    }
+    // 优先选中current_class
+    if (g_allClassStudents.count(g_currentClass)) {
+        g_configStudents = g_allClassStudents[g_currentClass];
+    } else if (g_allClassStudents.count(L"105")) {
+        g_currentClass = L"105";
+        g_configStudents = g_allClassStudents[L"105"];
+    } else if (!g_allClassStudents.empty()) {
+        g_currentClass = g_allClassStudents.begin()->first;
+        g_configStudents = g_allClassStudents.begin()->second;
     }
     // button3_url
     pos = content.find(L"\"button3_url\"");
@@ -170,15 +225,20 @@ static bool saveConfig() {
     CreateDirectoryW(dir.c_str(), NULL);
     FILE* f = _wfopen(cfg.c_str(), L"w, ccs=UTF-8");
     if (!f) return false;
-    // join students with |
-    std::wstring stu;
-    for (size_t i=0;i<g_configStudents.size();++i) {
-        if (i) stu += L"|";
-        stu += g_configStudents[i];
+    // 保存所有班级名单
+    fwprintf(f, L"{\n  \"manual_ip\": \"%ls\",\n  \"inner_url\": \"%ls\",\n  \"current_class\": \"%ls\",\n",
+        g_manualIp.c_str(), g_innerUrl.c_str(), g_currentClass.c_str());
+    // 多班级名单
+    for (const auto& kv : g_allClassStudents) {
+        std::wstring stu;
+        for (size_t i=0;i<kv.second.size();++i) {
+            if (i) stu += L"|";
+            stu += kv.second[i];
+        }
+        fwprintf(f, L"  \"students_%ls\": \"%ls\",\n", kv.first.c_str(), stu.c_str());
     }
-    fwprintf(f, L"{\n  \"manual_ip\": \"%ls\",\n  \"inner_url\": \"%ls\",\n  \"students\": \"%ls\",\n  \"button3_url\": \"%ls\",\n  \"button4_url\": \"%ls\",\n  \"button5_url\": \"%ls\",\n  \"roll_duration\": \"%d\"\n}\n",
-             g_manualIp.c_str(), g_innerUrl.c_str(), stu.c_str(),
-             g_button3Url.c_str(), g_button4Url.c_str(), g_button5Url.c_str(), g_rollDuration);
+    fwprintf(f, L"  \"button3_url\": \"%ls\",\n  \"button4_url\": \"%ls\",\n  \"button5_url\": \"%ls\",\n  \"roll_duration\": \"%d\"\n}\n",
+        g_button3Url.c_str(), g_button4Url.c_str(), g_button5Url.c_str(), g_rollDuration);
     fclose(f);
     return true;
 }
@@ -219,15 +279,23 @@ const wchar_t* getRandomStudent() {
         srand((unsigned int)time(NULL));
         initialized = true;
     }
-    
-    // 优先使用配置文件中的学生名单
+    // 优先使用当前班级名单
     if (!g_configStudents.empty()) {
         int randomIndex = rand() % g_configStudents.size();
         static std::wstring result;
         result = g_configStudents[randomIndex];
         return result.c_str();
     }
-    
+    // 如果当前班级名单为空，尝试用所有班级第一个
+    if (!g_allClassStudents.empty()) {
+        auto it = g_allClassStudents.begin();
+        if (!it->second.empty()) {
+            static std::wstring result;
+            int randomIndex = rand() % it->second.size();
+            result = it->second[randomIndex];
+            return result.c_str();
+        }
+    }
     // 如果配置为空，使用默认的 105 班名单
     int randomIndex = rand() % STUDENT_COUNT;
     return students105[randomIndex];
@@ -543,14 +611,11 @@ void ShowBeautifulRollCallWindow(const wchar_t* studentName) {
     }
     
     g_selectedStudent = studentName;
-    
     // 初始化动画状态
     g_isRolling = true;
     g_rollStartTime = GetTickCount();
-    
     // 注册窗口类
     const wchar_t ROLL_CLASS_NAME[] = L"BeautifulRollCallWindow";
-    
     WNDCLASSW wc = {};
     wc.lpfnWndProc = RollCallWindowProc;
     wc.hInstance = GetModuleHandle(NULL);
@@ -558,9 +623,7 @@ void ShowBeautifulRollCallWindow(const wchar_t* studentName) {
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(RGB(240, 248, 255));
     wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);  // 使用系统应用程序图标
-    
     RegisterClassW(&wc);
-    
     // 计算窗口位置（屏幕中央）
     int windowWidth = 480;  // 增加宽度以容纳两个按钮（保持原始大小）
     int windowHeight = 380; // 进一步增加高度以完整显示按钮（保持原始大小）
@@ -568,22 +631,20 @@ void ShowBeautifulRollCallWindow(const wchar_t* studentName) {
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenWidth - windowWidth) / 2;
     int y = (screenHeight - windowHeight) / 2;
-    
-    // 创建窗口
+    // 标题显示当前班级
+    std::wstring title = g_currentClass + L"班随机点名";
     g_rollCallWindow = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         ROLL_CLASS_NAME,
-        L"105班随机点名",
+        title.c_str(),
         WS_POPUP | WS_VISIBLE,
         x, y, windowWidth, windowHeight,
         g_hwnd, NULL, GetModuleHandle(NULL), NULL
     );
-    
     if (g_rollCallWindow) {
         ShowWindow(g_rollCallWindow, SW_SHOW);
         UpdateWindow(g_rollCallWindow);
         SetFocus(g_rollCallWindow);
-        
         // 启动2秒随机滚动动画
         SetTimer(g_rollCallWindow, TIMER_ID, 100, NULL); // 每100毫秒更新一次
     }
@@ -637,10 +698,24 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
 
             // 学生名单组
             int stuY = urlY + S(45); // 在URL组下方留出间距
+            // 班级选择标签
+            HWND staticClass = CreateWindowW(L"STATIC", L"选择班级：", WS_CHILD | WS_VISIBLE, S(20), stuY, S(80), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
+            SendMessage(staticClass, WM_SETFONT, (WPARAM)hFont, TRUE);
+            // 班级选择下拉框
+            HWND comboClass = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+                S(110), stuY, S(120), S(100), hwnd, (HMENU)3100, GetModuleHandle(NULL), NULL);
+            SendMessage(comboClass, WM_SETFONT, (WPARAM)hFont, TRUE);
+            // 添加班级选项
+            int classIndex = 0, selectedClassIndex = 0;
+            for (const auto& kv : g_allClassStudents) {
+                SendMessageW(comboClass, CB_ADDSTRING, 0, (LPARAM)kv.first.c_str());
+                if (kv.first == g_currentClass) selectedClassIndex = classIndex;
+                classIndex++;
+            }
+            SendMessageW(comboClass, CB_SETCURSEL, selectedClassIndex, 0);
             // 学生名单标签
-            HWND staticStu = CreateWindowW(L"STATIC", L"学生名单（空格或逗号分隔）：", WS_CHILD | WS_VISIBLE, S(20), stuY, S(250), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
+            HWND staticStu = CreateWindowW(L"STATIC", L"学生名单（空格或逗号分隔）：", WS_CHILD | WS_VISIBLE, S(250), stuY, S(250), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
             SendMessage(staticStu, WM_SETFONT, (WPARAM)hFont, TRUE);
-            
             // 学生名单编辑框（多行）
             stuY += S(25);
             std::wstring studentList;
@@ -678,18 +753,55 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
             else if (g_rollDuration == 1500) selectedIndex = 3;
             SendMessageW(comboAnim, CB_SETCURSEL, selectedIndex, 0);
 
-            // 更新按钮位置
-            int btnY = animY + S(50); // 在动画间隔设置下方留出间距
+            // 添加获取配置来源选项组
+            int configY = animY + S(50);
             
-            // 获取配置按钮（从 GitHub 下载）
-            HWND btnDownload = CreateWindowW(L"BUTTON", L"📥 获取配置", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(420), btnY, S(140), S(30), hwnd, (HMENU)3009, GetModuleHandle(NULL), NULL);
+            // 标签
+            HWND staticConfig = CreateWindowW(L"STATIC", L"选择配置来源：", WS_CHILD | WS_VISIBLE, 
+                S(20), configY, S(120), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
+            SendMessage(staticConfig, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // Notion配置源
+            HWND radioNotion = CreateWindowW(L"BUTTON", L"从Notion获取", 
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                S(140), configY, S(150), S(20), hwnd, (HMENU)3010, GetModuleHandle(NULL), NULL);
+            SendMessage(radioNotion, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // Github配置源
+            HWND radioGithub = CreateWindowW(L"BUTTON", L"从Github Pages获取", 
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                S(300), configY, S(150), S(20), hwnd, (HMENU)3011, GetModuleHandle(NULL), NULL);
+            SendMessage(radioGithub, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // 自定义配置源
+            configY += S(30);
+            HWND radioCustom = CreateWindowW(L"BUTTON", L"自定义配置源：", 
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                S(140), configY, S(150), S(20), hwnd, (HMENU)3012, GetModuleHandle(NULL), NULL);
+            SendMessage(radioCustom, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // 自定义URL输入框，默认填入示例地址
+            HWND editCustomUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"https://192.168.6.79/d:/config.json",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_DISABLED,
+                S(300), configY, S(260), S(24), hwnd, (HMENU)3013, GetModuleHandle(NULL), NULL);
+            SendMessage(editCustomUrl, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // 按钮位置调整
+            int btnY = configY + S(50);
+            
+            // 获取配置按钮
+            HWND btnDownload = CreateWindowW(L"BUTTON", L"📥 获取配置", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 
+                S(420), btnY, S(140), S(30), hwnd, (HMENU)3009, GetModuleHandle(NULL), NULL);
             SendMessage(btnDownload, WM_SETFONT, (WPARAM)hFont, TRUE);
             
             // 保存按钮
-            HWND btnSave = CreateWindowW(L"BUTTON", L"💾 保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(80), btnY, S(100), S(30), hwnd, (HMENU)3003, GetModuleHandle(NULL), NULL);
+            HWND btnSave = CreateWindowW(L"BUTTON", L"💾 保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 
+                S(80), btnY, S(100), S(30), hwnd, (HMENU)3003, GetModuleHandle(NULL), NULL);
             SendMessage(btnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
+            
             // 取消按钮
-            HWND btnCancel = CreateWindowW(L"BUTTON", L"❌ 取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, S(250), btnY, S(100), S(30), hwnd, (HMENU)3004, GetModuleHandle(NULL), NULL);
+            HWND btnCancel = CreateWindowW(L"BUTTON", L"❌ 取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 
+                S(250), btnY, S(100), S(30), hwnd, (HMENU)3004, GetModuleHandle(NULL), NULL);
             SendMessage(btnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             // 存储字体句柄，以便在WM_DESTROY中销毁
@@ -698,6 +810,35 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
         }
         case WM_COMMAND: {
             int wmId = LOWORD(wParam);
+            
+            // 处理单选按钮切换
+            if (wmId == 3010 || wmId == 3011 || wmId == 3012) {
+                HWND editCustomUrl = GetDlgItem(hwnd, 3013);
+                // 仅当选中"自定义配置源"时启用输入框
+                EnableWindow(editCustomUrl, wmId == 3012);
+                return 0;
+            }
+            
+            // 班级切换事件
+            if (wmId == 3100 && HIWORD(wParam) == CBN_SELCHANGE) {
+                HWND comboClass = GetDlgItem(hwnd, 3100);
+                int sel = SendMessageW(comboClass, CB_GETCURSEL, 0, 0);
+                wchar_t className[32] = {0};
+                SendMessageW(comboClass, CB_GETLBTEXT, sel, (LPARAM)className);
+                std::wstring newClass = className;
+                if (g_allClassStudents.count(newClass)) {
+                    g_currentClass = newClass;
+                    g_configStudents = g_allClassStudents[newClass];
+                    // 刷新学生名单编辑框
+                    std::wstring studentList;
+                    for (size_t i = 0; i < g_configStudents.size(); ++i) {
+                        if (i > 0) studentList += L" ";
+                        studentList += g_configStudents[i];
+                    }
+                    SetWindowTextW(GetDlgItem(hwnd, 3002), studentList.c_str());
+                }
+                return 0;
+            }
             switch (wmId) {
                 case 3003: // 保存按钮ID
                     {
@@ -708,7 +849,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
                         wchar_t buf2[4096];
                         GetWindowTextW(GetDlgItem(hwnd, 3002), buf2, 4096); // 获取学生名单
                         // split by space or comma
-                        g_configStudents.clear();
+                        std::vector<std::wstring> newStudents;
                         std::wistringstream iss(buf2);
                         std::wstring token;
                         while (std::getline(iss, token, L' ')) {
@@ -716,19 +857,20 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
                                 std::wistringstream iss2(token);
                                 std::wstring subToken;
                                 while (std::getline(iss2, subToken, L',')) {
-                                    if (!subToken.empty()) g_configStudents.push_back(subToken);
+                                    if (!subToken.empty()) newStudents.push_back(subToken);
                                 }
                             }
                         }
-                        // Fallback for '|' if no space/comma found or if user still uses it
-                        if (g_configStudents.empty() && std::wstring(buf2).find(L'|') != std::wstring::npos) {
-                            g_configStudents.clear();
+                        // Fallback for '|' if no space/comma found or如果用户仍用|
+                        if (newStudents.empty() && std::wstring(buf2).find(L'|') != std::wstring::npos) {
                             std::wistringstream iss3(buf2);
                             std::wstring subToken;
                             while (std::getline(iss3, subToken, L'|')) {
-                                if (!subToken.empty()) g_configStudents.push_back(subToken);
+                                if (!subToken.empty()) newStudents.push_back(subToken);
                             }
                         }
+                        g_configStudents = newStudents;
+                        g_allClassStudents[g_currentClass] = g_configStudents;
 
                         // 获取按钮3 URL
                         GetWindowTextW(GetDlgItem(hwnd, 3005), buf, 2048);
@@ -781,8 +923,34 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
                                 S(20), S(520), S(560), S(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
                             UpdateWindow(hwnd);
                             
-                            // 下载配置文件
-                            bool success = downloadConfigFromGitHub();
+                            // 获取选中的配置源
+                            int selectedSource = -1;
+                            if (SendMessageW(GetDlgItem(hwnd, 3010), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                                selectedSource = 3010;
+                            } else if (SendMessageW(GetDlgItem(hwnd, 3011), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                                selectedSource = 3011;
+                            } else if (SendMessageW(GetDlgItem(hwnd, 3012), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                                selectedSource = 3012;
+                            }
+
+                            bool success = false;
+                            if (selectedSource == 3012) {
+                                // 获取自定义URL
+                                wchar_t customUrl[1024] = {0};
+                                GetWindowTextW(GetDlgItem(hwnd, 3013), customUrl, 1024);
+                                if (wcslen(customUrl) == 0) {
+                                    MessageBoxW(hwnd, L"请输入自定义配置源URL！", L"提示", MB_OK | MB_ICONWARNING);
+                                    if (hStatus) DestroyWindow(hStatus);
+                                    return 0;
+                                }
+                                success = downloadConfigFromSource(selectedSource, customUrl);
+                            } else if (selectedSource != -1) {
+                                success = downloadConfigFromSource(selectedSource);
+                            } else {
+                                MessageBoxW(hwnd, L"请选择配置来源！", L"提示", MB_OK | MB_ICONWARNING);
+                                if (hStatus) DestroyWindow(hStatus);
+                                return 0;
+                            }
                             
                             // 删除状态提示
                             if (hStatus) DestroyWindow(hStatus);
@@ -819,7 +987,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
                                     MB_OK | MB_ICONINFORMATION);
                             } else {
                                 MessageBoxW(hwnd, 
-                                    L"配置文件下载失败！\n\n可能的原因：\n1. 网络连接问题\n2. GitHub 访问受限\n3. 文件路径错误\n\n请检查网络连接后重试，或手动下载配置文件。", 
+                                    L"配置文件下载失败！\n\n可能的原因：\n"
+                                    L"1. 网络连接问题\n"
+                                    L"2. 配置源访问受限\n"
+                                    L"3. URL错误或过期\n\n"
+                                    L"请检查网络连接和配置源后重试。",
                                     L"下载失败", 
                                     MB_OK | MB_ICONERROR);
                             }
